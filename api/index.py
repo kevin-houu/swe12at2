@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from flask import Flask, g, request, jsonify
+from flask import Flask, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import (
     JWTManager, create_access_token, create_refresh_token,
@@ -10,7 +10,6 @@ from flask_jwt_extended import (
 from dotenv import load_dotenv
 from datetime import timedelta
 from flask_cors import CORS
-from typing import Any, Optional
 
 load_dotenv()
 
@@ -43,60 +42,58 @@ jwt = JWTManager(app)
 
 class ApiResponse:
     @staticmethod
-    def success(message: str, body: Optional[Any] = None, status_code: int = 200) -> tuple[Any, int]:
-        response = {
-            "message": message,
-        }
+    def success(message: str, body: Optional[Any] = None, status_code: int = 200) -> tuple:
+        response = {"message": message}
         if body is not None:
             response["body"] = body
-            
         return jsonify(response), status_code
 
     @staticmethod
-    def error(message: str, status_code: int = 400) -> tuple[Any, int]:
+    def error(message: str, status_code: int = 400) -> tuple:
         return jsonify({"error": message}), status_code
 
+
 def get_db():
-    db = getattr(g, '_database', None)
-    if db is None:
-        db = g._database = sqlite3.connect(app.config['DATABASE'])
-        db.row_factory = sqlite3.Row
+    """ Return a new database connection. """
+    db = sqlite3.connect(app.config['DATABASE'])
+    db.row_factory = sqlite3.Row
     return db
 
-@app.teardown_appcontext
-def close_connection(exception=None):
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
 
 def init_db():
+    """ Initializes the database and creates tables if they do not exist. """
     db = get_db()
-    db.execute('''CREATE TABLE IF NOT EXISTS workplaces
-                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                   name TEXT NOT NULL,
-                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    db.execute('''CREATE TABLE IF NOT EXISTS users
-                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                   name TEXT NOT NULL,
-                   email TEXT UNIQUE NOT NULL,
-                   password TEXT NOT NULL,
-                   is_admin INTEGER DEFAULT 0,
-                   workplace_id INTEGER,
-                   FOREIGN KEY (workplace_id) REFERENCES workplaces (id))''')
-    
-    db.execute('''CREATE TABLE IF NOT EXISTS tickets
-                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                   title TEXT NOT NULL,
-                   description TEXT NOT NULL,
-                   status TEXT NOT NULL,
-                   priority TEXT NOT NULL,
-                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                   owner_id INTEGER,
-                   workplace_id INTEGER,
-                   FOREIGN KEY (owner_id) REFERENCES users (id),
-                   FOREIGN KEY (workplace_id) REFERENCES workplaces (id))''')
+    cursor = db.cursor()
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS workplaces
+                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       name TEXT NOT NULL,
+                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users
+                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       name TEXT NOT NULL,
+                       email TEXT UNIQUE NOT NULL,
+                       password TEXT NOT NULL,
+                       is_admin INTEGER DEFAULT 0,
+                       workplace_id INTEGER,
+                       FOREIGN KEY (workplace_id) REFERENCES workplaces (id))''')
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS tickets
+                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       title TEXT NOT NULL,
+                       description TEXT NOT NULL,
+                       status TEXT NOT NULL,
+                       priority TEXT NOT NULL,
+                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                       owner_id INTEGER,
+                       workplace_id INTEGER,
+                       FOREIGN KEY (owner_id) REFERENCES users (id),
+                       FOREIGN KEY (workplace_id) REFERENCES workplaces (id))''')
+
     db.commit()
+    db.close()
+
 
 @app.route('/api/signup', methods=['POST'])
 def signup():
@@ -113,13 +110,13 @@ def signup():
 
     cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
     if cursor.fetchone():
+        db.close()
         return ApiResponse.error("Email already registered")
 
     try:
         hashed_password = generate_password_hash(password)
         
-        cursor.execute("INSERT INTO workplaces (name) VALUES (?)", 
-                      (f"{email}'s workspace",))
+        cursor.execute("INSERT INTO workplaces (name) VALUES (?)", (f"{email}'s workspace",))
         workplace_id = cursor.lastrowid
 
         is_admin = 1 if admin_secret == app.config['ADMIN_SECRET'] else 0
@@ -131,6 +128,7 @@ def signup():
         user_id = cursor.lastrowid
 
         db.commit()
+        db.close()
 
         access_token = create_access_token(identity=str(user_id))
         refresh_token = create_refresh_token(identity=str(user_id))
@@ -153,7 +151,9 @@ def signup():
         return response, 201
 
     except Exception as e:
+        db.close()
         return ApiResponse.error(f"Failed to create user: {str(e)}", 500)
+
 
 @app.route('/api/signin', methods=['POST'])
 def signin():
@@ -169,6 +169,8 @@ def signin():
 
     cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
     user = cursor.fetchone()
+
+    db.close()
 
     if not user:
         return ApiResponse.error("Invalid email or password", 401)
@@ -195,6 +197,7 @@ def signin():
     
     return ApiResponse.error("Invalid email or password", 401)
 
+
 @app.route('/api/refresh', methods=['POST'])
 @jwt_required(refresh=True)
 def refresh():
@@ -209,11 +212,13 @@ def refresh():
     except Exception as e:
         return ApiResponse.error("Token refresh failed", 401)
 
+
 @app.route('/api/signout', methods=['POST'])
 def signout():
     response = ApiResponse.success("Logged out successfully")[0]
     unset_jwt_cookies(response)
     return response, 200
+
 
 @app.route('/api/user', methods=['GET'])
 @jwt_required()
@@ -230,6 +235,8 @@ def get_user():
         """, (current_user_id,))
         user = cursor.fetchone()
 
+        db.close()
+
         if user:
             user_data = {
                 "id": user['id'],
@@ -244,8 +251,7 @@ def get_user():
     except Exception as e:
         return ApiResponse.error(f"Failed to retrieve user: {str(e)}", 500)
 
-with app.app_context():
-    init_db()
 
 if __name__ == '__main__':
+    init_db()
     app.run(debug=True)
